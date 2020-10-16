@@ -3,6 +3,10 @@ import random
 import datetime
 import time
 import threading
+import locale
+
+# Set to your computer's local currency
+locale.setlocale( locale.LC_ALL, '' )
 
 # global variables you set to play this game:
 # Set your favourite numbers into the two lists below, in ascending order (so 1, 2, 3, 4, 5 not 3, 5, 2, 4, 1):
@@ -15,11 +19,11 @@ totalBank = 20000000  # this is the amount of money in your bank you spend at 2 
 # We can run lotteries in parallel - here decide how many simultaneous lottery draws you wish
 # (speeds up program execution)
 numberOfThreads = 16
-threadList = []
-threadData = []
+
 # OK, now save the script and run it with a Python 3.x (not 2.x) interpreter!
 # Let's see how much you win / lose!
 
+# internal use variables
 all_lotteryCount = 0
 all_totalPrize = 0
 win5s2 = 0
@@ -37,14 +41,21 @@ win2s1 = 0
 win2s0 = 0
 winFail = 0
 
+startTime = 0
+endTime = 0
+
+originalBank = 0
+threadList = []
+threadData = []
+
 # This threadLock variable will be used to ensure only one thread is printing to the screen
-# or updating global variables at a tim
+# or updating global variables at a time
 threadLock = threading.Lock()
 
 # This lotteryThread class stores the mechanics of running lottery draws
 class lotteryThread (threading.Thread):
 
-    # Run a single lottery draw!
+    # Run a single lottery draw
     def RunLotteryDraw(self):
 
         # Shuffle the list of 50 ball and 11 star possible values
@@ -191,7 +202,7 @@ class lotteryThread (threading.Thread):
             threadData[self.threadId] = data
             threadLock.release()
 
-# initialising function for the lotteryThread.
+    # initialising function for the lotteryThread.
     # threadId is the thread number as assigned by the initialising for() loop in main()
     # threadSpendingMoney is the amount this thread can spend. When it runs out, the thread will end.
     # wantedBalls is the list of ball values that we want to play with
@@ -231,7 +242,7 @@ class lotteryThread (threading.Thread):
             self.starPossibleValuesList.append(i + 1)
 
 
-# Run this thread's lottery mechanics
+    # Run this thread's lottery mechanics
     def run(self):
         self.totalPrize = 0
         self.lotteryCount = 0
@@ -239,7 +250,6 @@ class lotteryThread (threading.Thread):
         if threadLock.locked():
             print("Playing in thread " + str(self.threadId))
             threadLock.release()
-
 
         while self.threadSpendingMoney > 0:
             self.threadSpendingMoney -= 2  # spend 2 units on your lottery ticket
@@ -251,46 +261,57 @@ class lotteryThread (threading.Thread):
                 self.saveProgress()
 
         # Finally we add our results to the global variables
+        self.saveProgress()
         self.saveResultsToMainThread()
         print("Thread", str(self.threadId),"completed")
 
 
-def main():
-    print("EuroMillions Simulator v1.0 by Nick Lansley")
-    print("Lottery ticket numbers are (set in script): balls: " + str(wantedBalls) + "  stars: " + str(wantedStars))
+def spaceFormatData(data, maxLength):
+    if isinstance(data, str):
+        dataString = data
+    else:
+        dataString = str(data)
+    outputString = ""
+    diff = maxLength - len(dataString)
+    for spaceCounter in range(0, diff):
+        outputString += " "
+    return outputString + dataString
 
-    originalBank = totalBank
-    # Create the desired number of threads (simultaneous lottery draws)
-    for threadId in range (0, numberOfThreads):
-        threadSpendingMoney = int(totalBank / numberOfThreads)
-        threadList.append(lotteryThread(threadId, threadSpendingMoney, wantedBalls, wantedStars))
-        threadData.append({"lotteriesPlayed": 0, "prizeHaul": 0, "spendingMoneyLeft": 0})
+# this function places vertical bars | into a data string to give it a table look.
+# The column positions for the vars are in columnList e.g. [3, 7, 9]
+def placeTableVerticalBars(dataString, columnList):
+    outputString = ""
+    for columnNumber in range(0, len(dataString)):
+        if columnNumber in columnList:
+            outputString += "|"
+        else:
+            outputString += dataString[columnNumber:columnNumber+1]
+    return outputString
 
-    # Start the threads
-    startTime = datetime.datetime.now()
-    for threadId in range (0, numberOfThreads):
-        threadList[threadId].start()
 
-    # Wait for the threads to complete
-    allThreadsCompletedFlag = False
-    while not allThreadsCompletedFlag:
-        time.sleep(5)
-        allThreadsCompletedFlag = True
+# Prints the results so far in a tabular format
+def printDashboard():
+    locale.setlocale( locale.LC_ALL, '' )
+    verticalBarColumnList = [0, 8, 29, 44, 60]
+    threadLock.acquire(blocking=True, timeout=5)
+    if threadLock.locked():
+        print(placeTableVerticalBars(" ----------------------------------------------------------- ", verticalBarColumnList))
+        print(placeTableVerticalBars("  Thrd#    Lotteries played     Prize Haul       Money Left  ", verticalBarColumnList))
+        print(placeTableVerticalBars(" ----------------------------------------------------------- ", verticalBarColumnList))
         for threadId in range (0, numberOfThreads):
-            if threadList[threadId].is_alive():
-                allThreadsCompletedFlag = False
+            dataDict = threadData[threadId]
+            dataString = spaceFormatData(str(threadId), 5)
+            dataString += spaceFormatData(dataDict.get("lotteriesPlayed"), 21)
+            dataString += spaceFormatData(locale.currency(dataDict.get("prizeHaul"), grouping=True), 16)
+            dataString += spaceFormatData(locale.currency(dataDict.get("spendingMoneyLeft"), grouping=True), 17)
+            dataString += "      "
+            print(placeTableVerticalBars(dataString, verticalBarColumnList))
 
-        if not allThreadsCompletedFlag:
-            threadLock.acquire(blocking=True, timeout=5)
-            if threadLock.locked():
-                print("Thread    Lotteries played   Prize Haul    Money Left")
-                for threadId in range (0, numberOfThreads):
-                    dataDict = threadData[threadId]
-                    print(str(threadId), "    ",dataDict.get("lotteriesPlayed"), "    ",dataDict.get("prizeHaul"), "    ", dataDict.get("spendingMoneyLeft"))
-                print("-----------------------------------------------------")
-                threadLock.release()
+        print(placeTableVerticalBars(" ----------------------------------------------------------- ", verticalBarColumnList))
+        print()
+        threadLock.release()
 
-    endTime = datetime.datetime.now()
+def printResults():
     print("Completed!")
     print("Time taken:", endTime - startTime)
     print("Total lotteries played: " + '{:,}'.format(all_lotteryCount))
@@ -313,6 +334,47 @@ def main():
     print("2 + 0: " + str(win2s0))
     print("Lost!: " + str(winFail))
 
+
+def createAndStartThreads():
+    # Create the desired number of threads (simultaneous lottery draws)
+    for threadId in range (0, numberOfThreads):
+        threadSpendingMoney = int(totalBank / numberOfThreads)
+        threadList.append(lotteryThread(threadId, threadSpendingMoney, wantedBalls, wantedStars))
+        threadData.append({"lotteriesPlayed": 0, "prizeHaul": 0, "spendingMoneyLeft": 0})
+
+    # Start the threads
+    global startTime
+    startTime = datetime.datetime.now()
+    for threadId in range (0, numberOfThreads):
+        threadList[threadId].start()
+
+
+def main():
+    print("EuroMillions Simulator v1.0 by Nick Lansley")
+    print("Lottery ticket numbers are (set in script): balls: " + str(wantedBalls) + "  stars: " + str(wantedStars))
+
+    global originalBank
+    originalBank = totalBank
+
+    # Get those big money machines spinning!
+    createAndStartThreads()
+
+    # Wait for the threads to complete
+    allThreadsCompletedFlag = False
+    while not allThreadsCompletedFlag:
+        time.sleep(5)
+        allThreadsCompletedFlag = True
+        for threadId in range (0, numberOfThreads):
+            if threadList[threadId].is_alive():
+                allThreadsCompletedFlag = False
+
+        if not allThreadsCompletedFlag:
+            printDashboard()
+
+    global endTime
+    endTime = datetime.datetime.now()
+    printDashboard()
+    printResults()
 
 if __name__ == '__main__':
     main()
