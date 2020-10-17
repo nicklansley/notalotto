@@ -4,9 +4,10 @@ import datetime
 import time
 import threading
 import locale
+from tabulate import tabulate
 
 # Set to your computer's local currency
-locale.setlocale( locale.LC_ALL, '' )
+locale.setlocale( locale.LC_ALL, 'C' )
 
 # global variables you set to play this game:
 # Set your favourite numbers into the two lists below, in ascending order (so 1, 2, 3, 4, 5 not 3, 5, 2, 4, 1):
@@ -18,7 +19,7 @@ totalBank = 20000000  # this is the amount of money in your bank you spend at 2 
 
 # We can run lotteries in parallel - here decide how many simultaneous lottery draws you wish
 # (speeds up program execution)
-numberOfThreads = 16
+numberOfThreads = 4
 
 # OK, now save the script and run it with a Python 3.x (not 2.x) interpreter!
 # Let's see how much you win / lose!
@@ -48,9 +49,12 @@ originalBank = 0
 threadList = []
 threadData = []
 
-# This threadLock variable will be used to ensure only one thread is printing to the screen
-# or updating global variables at a time
-threadLock = threading.Lock()
+# This printOutputThreadLock variable will be used to ensure only one thread is printing to the screen
+# or updating global variables at a time.
+printOutputThreadLock = threading.Lock()
+# startingSignalThreadLock is sued for threads to set up and get themselves ready but not start running the draws until
+# the parent thread gives the signal by releasing this lock
+startingSignalThreadLock = threading.Lock()
 
 # This lotteryThread class stores the mechanics of running lottery draws
 class lotteryThread (threading.Thread):
@@ -106,10 +110,12 @@ class lotteryThread (threading.Thread):
         if (self.MatchedBalls(self.lotteryDrawBalls, self.wantedBalls, 5) and self.MatchedBalls(self.lotteryDrawStars, self.wantedStars, 2)):
             prizeValue = 44992371
             self.win5s2 += 1
-            threadLock.acquire(blocking=True, timeout=5)
-            if threadLock.locked():
+            printOutputThreadLock.acquire(blocking=True, timeout=5)
+            if printOutputThreadLock.locked():
                 print("Thread", self.threadId, "JACKPOT!!!")
-                threadLock.release()
+                if printOutputThreadLock.locked():
+                    printOutputThreadLock.release()
+
 
         elif (self.MatchedBalls(self.lotteryDrawBalls, self.wantedBalls, 5) and self.MatchedBalls(self.lotteryDrawStars, self.wantedStars, 1)):
             prizeValue = 305829
@@ -153,8 +159,8 @@ class lotteryThread (threading.Thread):
         return prizeValue
 
     def saveResultsToMainThread(self):
-        threadLock.acquire(blocking=True, timeout=50)
-        if threadLock.locked():
+        printOutputThreadLock.acquire(blocking=True, timeout=50)
+        if printOutputThreadLock.locked():
             print("Thread", str(self.threadId),"saving results...")
             global all_lotteryCount
             global all_totalPrize
@@ -190,17 +196,36 @@ class lotteryThread (threading.Thread):
             win2s0 += self.win2s0
             win2s2 += self.win2s2
             winFail += self.winFail
-            threadLock.release()
+            if printOutputThreadLock.locked():
+                printOutputThreadLock.release()
         else:
-            print("Could not lock the thread to save the results! :-(")
+            print("thread", self.threadId, "was unable to save the results! :-(")
 
+    def intWithCommas(self, integerToFormat):
+        if type(integerToFormat) not in [type(0), type(0)]:
+            raise TypeError("Parameter must be an integer.")
+        if integerToFormat < 0:
+            return '-' + self.intWithCommas(-integerToFormat)
+        result = ''
+        while integerToFormat >= 1000:
+            integerToFormat, r = divmod(integerToFormat, 1000)
+            result = ",%03d%s" % (r, result)
+        return "%d%s" % (integerToFormat, result)
+
+    # Saves this thread's progress into the global threadData array of dicts, each entry representing a particular thread
     def saveProgress(self):
-        threadLock.acquire(blocking=True, timeout=5)
-        if threadLock.locked():
+        printOutputThreadLock.acquire(blocking=True, timeout=5)
+        if printOutputThreadLock.locked():
             global threadData
-            data = {"lotteriesPlayed": self.lotteryCount, "prizeHaul": round(self.totalPrize, 2), "spendingMoneyLeft": self.threadSpendingMoney}
+            try:
+                data = {"threadId": self.threadId, "lotteriesPlayed": self.intWithCommas(self.lotteryCount), "prizeHaul": locale.currency(self.totalPrize, grouping=True), "spendingMoneyLeft": locale.currency(self.threadSpendingMoney, grouping=True)}
+            except ValueError:
+                # if there is a formatting error, just use the 'naked' values and don't try and format them
+                data = {"threadId": self.threadId, "lotteriesPlayed": self.lotteryCount, "prizeHaul": self.totalPrize, "spendingMoneyLeft": self.threadSpendingMoney}
+
             threadData[self.threadId] = data
-            threadLock.release()
+            if printOutputThreadLock.locked():
+                printOutputThreadLock.release()
 
     # initialising function for the lotteryThread.
     # threadId is the thread number as assigned by the initialising for() loop in main()
@@ -236,9 +261,9 @@ class lotteryThread (threading.Thread):
         # These two loops create a list of num values from 1 to 50 (for balls) and 1 to 11 (for stars)
         # Later, for each draw these two lists will be shuffled, and the first 5 ball entries and first 2
         # star entries will be chosen in the lottery draw.
-        for i in range(50):
+        for i in range(1, 51):
             self.ballPossibleValuesList.append(i + 1)
-        for i in range(11):
+        for i in range(1, 12):
             self.starPossibleValuesList.append(i + 1)
 
 
@@ -246,10 +271,21 @@ class lotteryThread (threading.Thread):
     def run(self):
         self.totalPrize = 0
         self.lotteryCount = 0
-        threadLock.acquire(blocking=True, timeout=5)
-        if threadLock.locked():
-            print("Playing in thread " + str(self.threadId))
-            threadLock.release()
+
+        printOutputThreadLock.acquire(blocking=True, timeout=5)
+        if printOutputThreadLock.locked():
+            print("Thread", str(self.threadId), "ready to play!")
+            printOutputThreadLock.release()
+
+        #  Now this thread is ready to play, wait for the starting signal
+        # from the main thread, which will unlock
+        while startingSignalThreadLock.locked():
+            time.sleep(1)
+
+        printOutputThreadLock.acquire(blocking=True, timeout=5)
+        if printOutputThreadLock.locked():
+            print("Thread", str(self.threadId), "playing!")
+            printOutputThreadLock.release()
 
         while self.threadSpendingMoney > 0:
             self.threadSpendingMoney -= 2  # spend 2 units on your lottery ticket
@@ -266,50 +302,15 @@ class lotteryThread (threading.Thread):
         print("Thread", str(self.threadId),"completed")
 
 
-def spaceFormatData(data, maxLength):
-    if isinstance(data, str):
-        dataString = data
-    else:
-        dataString = str(data)
-    outputString = ""
-    diff = maxLength - len(dataString)
-    for spaceCounter in range(0, diff):
-        outputString += " "
-    return outputString + dataString
-
-# this function places vertical bars | into a data string to give it a table look.
-# The column positions for the vars are in columnList e.g. [3, 7, 9]
-def placeTableVerticalBars(dataString, columnList):
-    outputString = ""
-    for columnNumber in range(0, len(dataString)):
-        if columnNumber in columnList:
-            outputString += "|"
-        else:
-            outputString += dataString[columnNumber:columnNumber+1]
-    return outputString
-
-
 # Prints the results so far in a tabular format
 def printDashboard():
     locale.setlocale( locale.LC_ALL, '' )
-    verticalBarColumnList = [0, 8, 29, 44, 60]
-    threadLock.acquire(blocking=True, timeout=5)
-    if threadLock.locked():
-        print(placeTableVerticalBars(" ----------------------------------------------------------- ", verticalBarColumnList))
-        print(placeTableVerticalBars("  Thrd#    Lotteries played     Prize Haul       Money Left  ", verticalBarColumnList))
-        print(placeTableVerticalBars(" ----------------------------------------------------------- ", verticalBarColumnList))
-        for threadId in range (0, numberOfThreads):
-            dataDict = threadData[threadId]
-            dataString = spaceFormatData(str(threadId), 5)
-            dataString += spaceFormatData(dataDict.get("lotteriesPlayed"), 21)
-            dataString += spaceFormatData(locale.currency(dataDict.get("prizeHaul"), grouping=True), 16)
-            dataString += spaceFormatData(locale.currency(dataDict.get("spendingMoneyLeft"), grouping=True), 17)
-            dataString += "      "
-            print(placeTableVerticalBars(dataString, verticalBarColumnList))
-
-        print(placeTableVerticalBars(" ----------------------------------------------------------- ", verticalBarColumnList))
+    printOutputThreadLock.acquire(blocking=True, timeout=5)
+    if printOutputThreadLock.locked():
+        print(tabulate(threadData, headers="keys", tablefmt='fancy_grid'))
         print()
-        threadLock.release()
+        if printOutputThreadLock.locked():
+            printOutputThreadLock.release()
 
 def printResults():
     print("Completed!")
@@ -337,16 +338,30 @@ def printResults():
 
 def createAndStartThreads():
     # Create the desired number of threads (simultaneous lottery draws)
-    for threadId in range (0, numberOfThreads):
-        threadSpendingMoney = int(totalBank / numberOfThreads)
-        threadList.append(lotteryThread(threadId, threadSpendingMoney, wantedBalls, wantedStars))
-        threadData.append({"lotteriesPlayed": 0, "prizeHaul": 0, "spendingMoneyLeft": 0})
+    print("Setting up the parallel Lottery Draw threads")
+    startingSignalThreadLock.acquire(blocking=True, timeout=5)
+
+    if startingSignalThreadLock.locked():
+        for threadId in range (0, numberOfThreads):
+            threadSpendingMoney = int(totalBank / numberOfThreads)
+            threadList.append(lotteryThread(threadId, threadSpendingMoney, wantedBalls, wantedStars))
+            threadData.append({"lotteriesPlayed": 0, "prizeHaul": 0, "spendingMoneyLeft": 0})
 
     # Start the threads
     global startTime
     startTime = datetime.datetime.now()
     for threadId in range (0, numberOfThreads):
         threadList[threadId].start()
+
+
+def startLottery():
+    for countDown in range(5, 1, -1):
+        print("Starting lottery in", countDown, "seconds")
+        time.sleep(1)
+
+    # release the starting lock!
+    startingSignalThreadLock.release()
+
 
 
 def main():
@@ -358,6 +373,10 @@ def main():
 
     # Get those big money machines spinning!
     createAndStartThreads()
+
+    # Start the lottery after a countdown (this time being used by the threads
+    # to ensure that everything is ready:
+    startLottery()
 
     # Wait for the threads to complete
     allThreadsCompletedFlag = False
